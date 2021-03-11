@@ -1,34 +1,29 @@
 import { mat4 } from 'gl-matrix';
 
-export function main() {
-  // Setup the hidden <video> element we use to capture frames
-  const video: HTMLVideoElement = document.querySelector('#webcam');
-  const canvas: HTMLCanvasElement = document.querySelector('#glCanvas');
-  const videoWidth = 1280;
-  const videoHeight = 720;
-  navigator.mediaDevices.getUserMedia({ video: { width: videoWidth, height: videoHeight }, audio: false }).then((stream) => {
-    video.srcObject = stream;
-  });
+function getOnFileSelectedForId(id: string): (event: any) => any {
+  return function onFileSelected(event) {
+    var selectedFile = event.target.files[0];
+    var reader = new FileReader();
 
-  const gl = canvas.getContext('webgl2');
+    var imgtag: HTMLImageElement = document.querySelector(id);
 
-  if (gl === null) {
-    alert('Couldn\'t get context');
-    return;
+    reader.onload = function(event) {
+      imgtag.src = event.target.result.toString();
+    };
+    reader.readAsDataURL(selectedFile);
   }
+}
 
+function setupRenderingContext(gl: WebGL2RenderingContext) {
   gl.clearColor(0.0, 0.0, 0.0, 1.0);
-  gl.clear(gl.COLOR_BUFFER_BIT);
+  gl.clearDepth(1.0);
+  gl.enable(gl.DEPTH_TEST);
+  gl.depthFunc(gl.LEQUAL);
+  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+}
 
-  const texture = initTexture(gl);
-
-  // Shaders are loaded via the webpack-glsl-loader module
-  const vsSource = require('../static/shader.vert');
-  const fsSource = require('../static/shader.frag');
-
-  const shaderProgram = initShaderProgram(gl, vsSource, fsSource);
-
-  const programInfo = {
+function getProgramInfo(gl: WebGL2RenderingContext, shaderProgram:WebGLProgram) {
+  return {
     program: shaderProgram,
     attribLocations: {
       vertexPosition: gl.getAttribLocation(shaderProgram, 'aVertexPosition'),
@@ -37,25 +32,57 @@ export function main() {
     uniformLocations: {
       projectionMatrix: gl.getUniformLocation(shaderProgram, 'uProjectionMatrix'),
       modelViewMatrix: gl.getUniformLocation(shaderProgram, 'uModelViewMatrix'),
-      uSampler: gl.getUniformLocation(shaderProgram, 'uSampler'),
+      uWebcam: gl.getUniformLocation(shaderProgram, 'uWebcam'),
+      uBackground: gl.getUniformLocation(shaderProgram, 'uBackground'),
       uMirror: gl.getUniformLocation(shaderProgram, 'uMirror'),
     },
   };
+}
 
+export function main() {
+  const canvas: HTMLCanvasElement = document.querySelector('#glCanvas');
+  const gl = canvas.getContext('webgl2');
+  if (gl === null) {
+    alert('Couldn\'t get context');
+    return;
+  }
+  setupRenderingContext(gl);
+  
+  const video: HTMLVideoElement = document.querySelector('#webcam');
+  const constraints = { video: { width: canvas.width, height: canvas.height }, audio: false };
+  navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
+    video.srcObject = stream;
+  });  
+
+  const background: HTMLImageElement = document.querySelector('#background');
+  const backgroundSelector: HTMLInputElement = document.querySelector('#file');
+  backgroundSelector.onchange = getOnFileSelectedForId('#background');
+
+  const foregroundTexture = initTexture(gl);
+  const backgroundTexture = initTexture(gl);
+
+  // Shaders are loaded via the webpack-glsl-loader module
+  const vsSource = require('../static/shader.vert');
+  const fsSource = require('../static/shader.frag');
+
+  const shaderProgram = initShaderProgram(gl, vsSource, fsSource);
+  const programInfo = getProgramInfo(gl, shaderProgram);
   const buffers = initBuffers(gl);
-  let then = 0;
 
+  setupTexturePlane(gl, programInfo, buffers);
+
+  let then = 0;
   function render(now: number) {
     now *= 0.001;
     const delta = now - then;
     then = now;
 
-    updateTexture(gl, texture, video);
+    updateTexture(gl, foregroundTexture, video);
+    updateTexture(gl, backgroundTexture, background);
 
-    drawScene(gl, programInfo, buffers, texture, delta);
+    drawScene(gl, programInfo, buffers, foregroundTexture, backgroundTexture, delta);
     requestAnimationFrame(render);
   }
-
   requestAnimationFrame(render);
 }
 
@@ -92,15 +119,17 @@ function loadShader(gl: WebGL2RenderingContext, type: number, source: string) {
   return shader;
 }
 
+/**
+ * initializes corner positions of the canvas and corresponding texture coordinates
+ */
 function initBuffers(gl: WebGL2RenderingContext) {
   const positionBuffer = gl.createBuffer();
 
   gl.bindBuffer(gl.ARRAY_BUFFER, positionBuffer);
 
-  // TODO: Fix image size (also see modelViewMatrix)
   const aspect = gl.canvas.width / gl.canvas.height;
-  const halfWidth = 4; // gl.canvas.width / 2;
-  const halfHeight = halfWidth / aspect;
+  const halfHeight = 6;
+  const halfWidth = halfHeight * aspect;
   const positions = [
     -halfWidth, halfHeight,
     halfWidth, halfHeight,
@@ -126,18 +155,31 @@ function initBuffers(gl: WebGL2RenderingContext) {
   return { position: positionBuffer, textureCoord: textureCoordBuffer };
 }
 
-function drawScene(gl: WebGL2RenderingContext, programInfo, buffers, texture: WebGLTexture, delta) {
-  gl.clearColor(0.0, 0.0, 0.0, 1.0);
-  gl.clearDepth(1.0);
-  gl.enable(gl.DEPTH_TEST);
-  gl.depthFunc(gl.LEQUAL);
+function setupTexturePlane(gl: WebGL2RenderingContext, programInfo, buffers) {
+  const numComponents = 2;
+  const type = gl.FLOAT;
+  const normalize = false;
+  const stride = 0;
+  const offset = 0;
 
-  gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+  // Create texture plane
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position);
+  gl.vertexAttribPointer(programInfo.attribLocations.vertexPosition, numComponents, type, normalize, stride, offset);
+  gl.enableVertexAttribArray(programInfo.attribLocations.vertexPosition);
 
-  const mirror: HTMLInputElement = document.querySelector('#mirror');
-  const orientation = mirror.checked ? -1 : 1;
+  // Add corresponding texture coordinates
+  gl.bindBuffer(gl.ARRAY_BUFFER, buffers.textureCoord);
+  gl.vertexAttribPointer(programInfo.attribLocations.textureCoord, numComponents, type, normalize, stride, offset);
+  gl.enableVertexAttribArray(programInfo.attribLocations.textureCoord);
+}
 
-  const fieldOfView = 45 * Math.PI / 180;
+/**
+ * 
+ * @returns [projectionMatrix, modelViewMatrix]
+ */
+function setupCamera(gl: WebGL2RenderingContext): [mat4, mat4] {
+  // TODO: replace magic numbers
+  const fieldOfView = Math.atan(1) * 2;
   const aspect = gl.canvas.width / gl.canvas.height;
   const zNear = 0.1;
   const zFar = 100;
@@ -146,48 +188,33 @@ function drawScene(gl: WebGL2RenderingContext, programInfo, buffers, texture: We
   mat4.perspective(projectionMatrix, fieldOfView, aspect, zNear, zFar);
 
   const modelViewMatrix = mat4.create();
-  mat4.translate(modelViewMatrix, modelViewMatrix, [-0, 0, -6]);
+  const cameraDistance = 6;
+  mat4.translate(modelViewMatrix, modelViewMatrix, [0, 0, -cameraDistance]);
 
-  {
-    const numComponents = 2;
-    const type = gl.FLOAT;
-    const normalize = false;
-    const stride = 0;
-    const offset = 0;
-
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffers.position);
-    gl.vertexAttribPointer(programInfo.attribLocations.vertexPosition, numComponents, type, normalize, stride, offset);
-    gl.enableVertexAttribArray(programInfo.attribLocations.vertexPosition);
-  }
-
-  {
-    const numComponents = 2;
-    const type = gl.FLOAT;
-    const normalize = false;
-    const stride = 0;
-    const offset = 0;
-
-    gl.bindBuffer(gl.ARRAY_BUFFER, buffers.textureCoord);
-    gl.vertexAttribPointer(programInfo.attribLocations.textureCoord, numComponents, type, normalize, stride, offset);
-    gl.enableVertexAttribArray(programInfo.attribLocations.textureCoord);
-  }
-
+  return [projectionMatrix, modelViewMatrix];
+}
+function drawScene(gl: WebGL2RenderingContext, programInfo, buffers, foregroundTexture: WebGLTexture, backgroundTexture: WebGLTexture, delta) {
   gl.useProgram(programInfo.program);
 
+  const mirror: HTMLInputElement = document.querySelector('#mirror');
+  const orientation = mirror.checked ? -1 : 1;
   gl.uniform1f(programInfo.uniformLocations.uMirror, orientation);
 
+  const [projectionMatrix, modelViewMatrix] = setupCamera(gl);
   gl.uniformMatrix4fv(programInfo.uniformLocations.projectionMatrix, false, projectionMatrix);
   gl.uniformMatrix4fv(programInfo.uniformLocations.modelViewMatrix, false, modelViewMatrix);
 
   gl.activeTexture(gl.TEXTURE0);
-  gl.bindTexture(gl.TEXTURE_2D, texture);
-  gl.uniform1i(programInfo.uniformLocations.uSampler, 0);
+  gl.bindTexture(gl.TEXTURE_2D, foregroundTexture);
+  gl.activeTexture(gl.TEXTURE1);
+  gl.bindTexture(gl.TEXTURE_2D, backgroundTexture);
 
-  {
-    const offset = 0;
-    const vertexCount = 4;
-    gl.drawArrays(gl.TRIANGLE_STRIP, offset, vertexCount);
-  }
+  gl.uniform1i(programInfo.uniformLocations.uWebcam, 0);
+  gl.uniform1i(programInfo.uniformLocations.uBackground, 1);
+
+  const offset = 0;
+  const vertexCount = 4;
+  gl.drawArrays(gl.TRIANGLE_STRIP, offset, vertexCount);
 }
 
 // Initializes the webcam texture
@@ -212,8 +239,8 @@ function initTexture(gl: WebGL2RenderingContext) {
   return texture;
 }
 
-// Updates the webcam texture with the current frame
-function updateTexture(gl: WebGL2RenderingContext, texture: WebGLTexture, video: HTMLVideoElement) {
+// Updates the specified texture with the current frame
+function updateTexture(gl: WebGL2RenderingContext, texture: WebGLTexture, video: HTMLVideoElement | HTMLImageElement) {
   const level = 0;
   const internalFormat = gl.RGBA;
   const srcFormat = gl.RGBA;
