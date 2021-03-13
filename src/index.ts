@@ -5,7 +5,7 @@ function getOnFileSelectedForId(id: string): (event: any) => any {
     var selectedFile = event.target.files[0];
     var reader = new FileReader();
 
-    var imgtag: HTMLImageElement = document.querySelector(id);
+    var imgtag: HTMLImageElement | HTMLVideoElement = document.querySelector(id);
 
     reader.onload = function(event) {
       imgtag.src = event.target.result.toString();
@@ -39,6 +39,14 @@ function getProgramInfo(gl: WebGL2RenderingContext, shaderProgram:WebGLProgram) 
   };
 }
 
+function useWebcamForVideo(video: HTMLVideoElement,width, height) {
+  const constraints = { video: { width: width, height: height }, audio: false };
+  navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
+    video.srcObject = stream;
+  });  
+
+}
+
 export function main() {
   const canvas: HTMLCanvasElement = document.querySelector('#glCanvas');
   const gl = canvas.getContext('webgl2');
@@ -49,14 +57,18 @@ export function main() {
   setupRenderingContext(gl);
   
   const video: HTMLVideoElement = document.querySelector('#webcam');
-  const constraints = { video: { width: canvas.width, height: canvas.height }, audio: false };
-  navigator.mediaDevices.getUserMedia(constraints).then((stream) => {
-    video.srcObject = stream;
-  });  
+  useWebcamForVideo(video, canvas.width, canvas.height);
+
+  const webcamButton: HTMLButtonElement = document.querySelector('#use_webcam');
+  webcamButton.onclick = () => {
+    useWebcamForVideo(video, canvas.width, canvas.height);
+  };
 
   const background: HTMLImageElement = document.querySelector('#background');
   const backgroundSelector: HTMLInputElement = document.querySelector('#file');
   backgroundSelector.onchange = getOnFileSelectedForId('#background');
+  const foregroundSelector: HTMLInputElement = document.querySelector('#foreground');
+  foregroundSelector.onchange = (event) => {video.srcObject = null;getOnFileSelectedForId('#webcam')(event)};
 
   const foregroundTexture = initTexture(gl);
   const backgroundTexture = initTexture(gl);
